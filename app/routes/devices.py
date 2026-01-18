@@ -69,7 +69,7 @@ def get_devices():
 
         return jsonify({
             "devices": processed_devices,
-            "server_time": now.isoformat() + "Z"
+            "server_time": now.replace(tzinfo=None).isoformat() + "Z"
         })
     except Exception as e:
         logger.error(f"Error fetching devices: {e}")
@@ -110,7 +110,7 @@ def get_device_detail(hid):
         return jsonify({
             "device": device,
             "history": history,
-            "server_time": datetime.utcnow().isoformat() + "Z"
+            "server_time": now.replace(tzinfo=None).isoformat() + "Z"
         })
     except Exception as e:
         logger.error(f"Error in detail: {e}")

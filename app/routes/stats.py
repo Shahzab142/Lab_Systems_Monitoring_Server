@@ -89,7 +89,10 @@ def get_location_stats():
                 "offline_labs": len(data["labs"]) - len(data["online_labs_set"])
             })
         
-        return jsonify(result)
+        return jsonify({
+            "locations": result,
+            "server_time": now.replace(tzinfo=None).isoformat() + "Z"
+        })
     except Exception as e:
         logger.error(f"Critical Error in location stats: {e}")
         import traceback
@@ -108,6 +111,10 @@ def get_lab_stats(city):
         
         lab_map = {}
         for d in devices:
+            # PROFESSIONAL: Skip unregistered slots
+            if not d.get("hardware_id"):
+                continue
+
             lab = d.get("lab_name") or "Main Lab"
             if lab not in lab_map:
                 lab_map[lab] = {"lab_name": lab, "total_pcs": 0, "online": 0, "offline": 0}
@@ -127,7 +134,10 @@ def get_lab_stats(city):
             else:
                 lab_map[lab]["offline"] += 1
         
-        return jsonify(list(lab_map.values()))
+        return jsonify({
+            "labs": list(lab_map.values()),
+            "server_time": now.replace(tzinfo=None).isoformat() + "Z"
+        })
     except Exception as e:
         logger.error(f"Error in lab stats: {e}")
         return jsonify([]), 500
@@ -171,7 +181,8 @@ def overview():
             "total_devices": total,
             "online_devices": online,
             "offline_devices": total - online,
-            "status": "synchronized"
+            "status": "synchronized",
+            "server_time": now.replace(tzinfo=None).isoformat() + "Z"
         })
     except Exception as e:
         logger.error(f"Error in overview: {e}")
