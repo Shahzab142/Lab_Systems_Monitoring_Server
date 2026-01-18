@@ -185,6 +185,8 @@ def sync_offline_data():
             "app_usage": data.get("app_usage", {})
         }
         
+        incoming_usage = data.get("app_usage", {})
+        
         # Merging Logic: Check if row already exists and merge app_usage
         check_res = extensions.supabase.table("device_daily_history") \
             .select("app_usage, runtime_minutes, avg_score") \
@@ -195,7 +197,6 @@ def sync_offline_data():
         if check_res.data:
             existing = check_res.data[0]
             existing_usage = existing.get("app_usage") or {}
-            incoming_usage = data.get("app_usage", {})
             
             # Merge usage maps
             for app, sec in incoming_usage.items():
