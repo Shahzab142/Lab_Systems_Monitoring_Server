@@ -1,0 +1,10 @@
+flask
+flask-cors
+flask-socketio
+python-dotenv
+supabase
+pyjwt
+requests
+gunicorn
+gevent
+gevent-websocket
