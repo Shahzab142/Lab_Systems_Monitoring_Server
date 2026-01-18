@@ -31,6 +31,36 @@ def process_app_logs_background(sys_id, date_str, usage_map):
     except Exception as e:
         logger.error(f"⚠️ Async Log Flush Failed: {e}")
 
+@agent_bp.route("/auth", methods=["POST"])
+def authenticate_hardware():
+    """Verify if a hardware ID is registered in the database."""
+    data = request.get_json(force=True)
+    hid = data.get("hardware_id")
+    
+    if not hid:
+        return jsonify({"error": "Missing Hardware ID"}), 400
+        
+    try:
+        res = extensions.supabase.table("devices").select("*").eq("hardware_id", hid).execute()
+        if res.data:
+            device = res.data[0]
+            return jsonify({
+                "status": "authorized",
+                "system_id": device.get("system_id"),
+                "city": device.get("city"),
+                "lab_name": device.get("lab_name"),
+                "pc_name": device.get("pc_name")
+            })
+        else:
+            return jsonify({
+                "status": "unregistered",
+                "hardware_id": hid,
+                "message": "Security Verification Failed: Hardware ID not found in registry."
+            })
+    except Exception as e:
+        logger.error(f"Auth Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @agent_bp.route("/heartbeat", methods=["POST"])
 def heartbeat():
     data = request.get_json(force=True)
@@ -81,10 +111,10 @@ def heartbeat():
         # We overwrite instead of summing to prevent the geometric growth bug (adding totals to totals).
         incoming_usage = data.get("app_usage", {})
         
-        # Filter out background noise that might have slipped through
+        # Filter out background noise that might have slipped through (Stricter string matching)
         filtered_usage = {
             app: sec for app, sec in incoming_usage.items() 
-            if app.lower() not in ["python", "antigravity", "lab_systems_agent", "python runner"]
+            if "python" not in app.lower() and "antigravity" not in app.lower() and "lab_systems_agent" not in app.lower()
         }
         
         update_data["app_usage"] = filtered_usage
