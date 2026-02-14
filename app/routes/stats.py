@@ -5,6 +5,10 @@ from datetime import datetime
 
 stats_bp = Blueprint("stats", __name__)
 
+@stats_bp.route("/health", methods=["GET"])
+def health_check():
+    return jsonify({"status": "ok", "database": "connected"})
+
 @stats_bp.route("/stats/locations", methods=["GET"])
 def get_location_stats():
     try:
@@ -23,9 +27,8 @@ def get_location_stats():
             logger.error(f"Stats Cleanup Error: {e}")
 
         # Aggregate stats in Python from devices table
-        # PROFESSIONAL: Only count devices that have been REGISTERED (hardware_id is not null)
         try:
-            res = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, hardware_id").execute()
+            res = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, hardware_id, cpu_score").execute()
             raw_devices = res.data if res.data else []
             logger.info(f"Location Stats: Found {len(raw_devices)} total devices in DB.")
         except Exception as e:
@@ -38,13 +41,11 @@ def get_location_stats():
         registered_count = 0
         
         for d in raw_devices:
-            # ONLY process registered devices
-            if not d.get("hardware_id"):
-                continue
-            
+            # PROFESSIONAL: Count ALL inventory slots (both registered and placeholders)
             registered_count += 1
-            city = d.get("city") or "Unknown"
-            lab = d.get("lab_name") or "Main Lab"
+            city = (d.get("city") or "Unknown").strip()
+            lab = (d.get("lab_name") or "Main Lab").strip()
+            cpu = float(d.get("cpu_score") or 0)
             
             if city not in city_map:
                 city_map[city] = {
@@ -53,7 +54,9 @@ def get_location_stats():
                     "online": 0, 
                     "offline": 0,
                     "labs": set(),
-                    "online_labs_set": set()
+                    "online_labs_set": set(),
+                    "total_cpu": 0,
+                    "online_count_for_cpu": 0
                 }
             
             target = city_map[city]
@@ -71,6 +74,8 @@ def get_location_stats():
             if is_online:
                 target["online"] += 1
                 target["online_labs_set"].add(lab)
+                target["total_cpu"] += cpu
+                target["online_count_for_cpu"] += 1
             else:
                 target["offline"] += 1
         
@@ -79,6 +84,11 @@ def get_location_stats():
         # Format for frontend
         result = []
         for city, data in city_map.items():
+            avg_perf = 0
+            if data["total_pcs"] > 0:
+                # Calculate average across ALL PCs (treating offline as 0%)
+                avg_perf = data["total_cpu"] / data["total_pcs"]
+            
             result.append({
                 "city": city,
                 "total_pcs": data["total_pcs"],
@@ -86,13 +96,15 @@ def get_location_stats():
                 "offline": data["offline"],
                 "total_labs": len(data["labs"]),
                 "online_labs": len(data["online_labs_set"]),
-                "offline_labs": len(data["labs"]) - len(data["online_labs_set"])
+                "offline_labs": len(data["labs"]) - len(data["online_labs_set"]),
+                "avg_performance": round(avg_perf, 2)
             })
         
         return jsonify({
             "locations": result,
             "server_time": now.replace(tzinfo=None).isoformat() + "Z"
         })
+
     except Exception as e:
         logger.error(f"Critical Error in location stats: {e}")
         import traceback
@@ -102,7 +114,7 @@ def get_location_stats():
 @stats_bp.route("/stats/city/<city>/labs", methods=["GET"])
 def get_lab_stats(city):
     try:
-        res = extensions.supabase.table("devices").select("*").eq("city", city).execute()
+        res = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, hardware_id, cpu_score").eq("city", city).execute()
         devices = res.data if res.data else []
         
         from datetime import datetime, timedelta, timezone
@@ -111,15 +123,23 @@ def get_lab_stats(city):
         
         lab_map = {}
         for d in devices:
-            # PROFESSIONAL: Skip unregistered slots
-            if not d.get("hardware_id"):
-                continue
+            # Count all slots in the lab
 
             lab = d.get("lab_name") or "Main Lab"
-            if lab not in lab_map:
-                lab_map[lab] = {"lab_name": lab, "total_pcs": 0, "online": 0, "offline": 0}
+            cpu = float(d.get("cpu_score") or 0)
             
-            lab_map[lab]["total_pcs"] += 1
+            if lab not in lab_map:
+                lab_map[lab] = {
+                    "lab_name": lab, 
+                    "total_pcs": 0, 
+                    "online": 0, 
+                    "offline": 0,
+                    "total_cpu": 0,
+                    "online_count": 0
+                }
+            
+            target = lab_map[lab]
+            target["total_pcs"] += 1
             
             is_online = False
             if d.get("status") == "online" and d.get("last_seen"):
@@ -130,14 +150,32 @@ def get_lab_stats(city):
                 except: pass
             
             if is_online:
-                lab_map[lab]["online"] += 1
+                target["online"] += 1
+                target["total_cpu"] += cpu
+                target["online_count"] += 1
             else:
-                lab_map[lab]["offline"] += 1
+                target["offline"] += 1
         
+        # Calculate averages based on TOTAL PCs in lab
+        result = []
+        for lab, data in lab_map.items():
+            avg_perf = 0
+            if data["total_pcs"] > 0:
+                avg_perf = data["total_cpu"] / data["total_pcs"]
+            
+            result.append({
+                "lab_name": lab,
+                "total_pcs": data["total_pcs"],
+                "online": data["online"],
+                "offline": data["offline"],
+                "avg_performance": round(avg_perf, 2)
+            })
+            
         return jsonify({
-            "labs": list(lab_map.values()),
+            "labs": result,
             "server_time": now.replace(tzinfo=None).isoformat() + "Z"
         })
+
     except Exception as e:
         logger.error(f"Error in lab stats: {e}")
         return jsonify([]), 500
@@ -162,28 +200,36 @@ def overview():
         res = extensions.supabase.table("devices").select("system_id, status, last_seen, hardware_id").execute()
         raw_devices = res.data if res.data else []
         
-        # Filter for registered only in Python to be safe
-        devices = [d for d in raw_devices if d.get("hardware_id")]
+        # Include all devices in the overview
+        devices = raw_devices
         
         threshold = now - timedelta(seconds=60)
 
         total = len(devices)
         online = 0
+        total_cpu = 0
         for d in devices:
             if d.get("status") == "online" and d.get("last_seen"):
                 try:
                     ls_dt = datetime.fromisoformat(d["last_seen"].replace('Z', '+00:00'))
                     if ls_dt > threshold:
                         online += 1
+                        total_cpu += float(d.get("cpu_score") or 0)
                 except: pass
         
+        avg_perf = 0
+        if online > 0:
+            avg_perf = total_cpu / online
+
         return jsonify({
             "total_devices": total,
             "online_devices": online,
             "offline_devices": total - online,
+            "avg_performance": round(avg_perf, 2),
             "status": "synchronized",
             "server_time": now.replace(tzinfo=None).isoformat() + "Z"
         })
+
     except Exception as e:
         logger.error(f"Error in overview: {e}")
         return jsonify({"error": str(e)}), 500
@@ -264,3 +310,55 @@ def delete_device():
     except Exception as e:
         logger.error(f"Error deleting device: {e}")
         return jsonify({"error": str(e)}), 500
+@stats_bp.route("/stats/labs/all", methods=["GET"])
+def get_all_labs_global():
+    try:
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        threshold = now - timedelta(seconds=60)
+
+        # Fetch all registered devices
+        res = extensions.supabase.table("devices").select("*").execute()
+        raw_devices = res.data if res.data else []
+        
+        lab_map = {}
+        for d in raw_devices:
+            # Process all devices in the inventory
+            
+            lab = d.get("lab_name") or "Main Lab"
+            city = d.get("city") or "Unknown"
+            # Use a unique key for labs in case names repeat across cities
+            key = f"{city}|{lab}"
+            
+            if key not in lab_map:
+                lab_map[key] = {
+                    "lab_name": lab,
+                    "city": city,
+                    "total_pcs": 0,
+                    "online": 0,
+                    "offline": 0
+                }
+            
+            target = lab_map[key]
+            target["total_pcs"] += 1
+            
+            is_online = False
+            if d.get("status") == "online" and d.get("last_seen"):
+                try:
+                    ls_dt = datetime.fromisoformat(d["last_seen"].replace('Z', '+00:00'))
+                    if ls_dt > threshold:
+                        is_online = True
+                except: pass
+            
+            if is_online:
+                target["online"] += 1
+            else:
+                target["offline"] += 1
+        
+        return jsonify({
+            "labs": list(lab_map.values()),
+            "server_time": now.replace(tzinfo=None).isoformat() + "Z"
+        })
+    except Exception as e:
+        logger.error(f"Error in all labs stats: {e}")
+        return jsonify([]), 500

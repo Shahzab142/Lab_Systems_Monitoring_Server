@@ -15,11 +15,17 @@ def process_app_logs_background(sys_id, date_str, usage_map):
         
         log_entries = []
         for app, sec in usage_map.items():
+            try:
+                # Force cast to integer to prevent "invalid input syntax for type integer"
+                clean_sec = int(float(sec))
+            except:
+                clean_sec = 0
+
             log_entries.append({
                 "device_id": sys_id,
                 "date": date_str,
                 "app_name": app,
-                "seconds_added": sec
+                "seconds_added": clean_sec
             })
         
         if log_entries:
@@ -41,6 +47,21 @@ def authenticate_hardware():
         return jsonify({"error": "Missing Hardware ID"}), 400
         
     try:
+        # Check if agent is providing city/lab info to update DB
+        city = data.get("city")
+        lab_name = data.get("lab_name")
+        college = data.get("college")
+        pc_name = data.get("pc_name")
+        
+        if city or lab_name or college or pc_name:
+            update_payload = {}
+            if city: update_payload["city"] = city
+            if lab_name: update_payload["lab_name"] = lab_name
+            if college: update_payload["college"] = college
+            if pc_name: update_payload["pc_name"] = pc_name
+            
+            extensions.supabase.table("devices").update(update_payload).eq("hardware_id", hid).execute()
+
         res = extensions.supabase.table("devices").select("*").eq("hardware_id", hid).execute()
         if res.data:
             device = res.data[0]
@@ -48,6 +69,7 @@ def authenticate_hardware():
                 "status": "authorized",
                 "system_id": device.get("system_id"),
                 "city": device.get("city"),
+                "college": device.get("college"),
                 "lab_name": device.get("lab_name"),
                 "pc_name": device.get("pc_name")
             })
@@ -94,28 +116,39 @@ def heartbeat():
         pc_name = data.get("pc_name")
         cpu_score = data.get("cpu_score", 0)
         city = data.get("city")
+        college = data.get("college")
         lab_name = data.get("lab_name")
-        # Prepare payload for updating 'devices' table (Current status)
+        # Sanitize numeric data to prevent "invalid input syntax for type integer: '345.4'"
+        try:
+            runtime_mins = int(float(data.get("runtime_minutes", 0)))
+        except:
+            runtime_mins = 0
+
         update_data = {
             "last_seen": now_iso,
             "today_last_active": agent_active,
             "pc_name": pc_name,
-            "city": city,
-            "lab_name": lab_name,
             "cpu_score": cpu_score,
-            "runtime_minutes": data.get("runtime_minutes", 0),
+            "runtime_minutes": runtime_mins,
             "status": data.get("status", "online")
         }
 
-        # Digital Wellbeing: The agent sends its authoritative daily total.
-        # We overwrite instead of summing to prevent the geometric growth bug (adding totals to totals).
+        if city: update_data["city"] = city
+        if college: update_data["college"] = college
+        if lab_name: update_data["lab_name"] = lab_name
+
+        # Sanitize app_usage (durations should be integers)
         incoming_usage = data.get("app_usage", {})
         
-        # Filter out background noise that might have slipped through (Stricter string matching)
-        filtered_usage = {
-            app: sec for app, sec in incoming_usage.items() 
-            if "python" not in app.lower() and "antigravity" not in app.lower() and "lab_systems_agent" not in app.lower()
-        }
+        # Filter out background noise and cast to int
+        filtered_usage = {}
+        for app, sec_val in incoming_usage.items():
+            if "python" in app.lower() or "antigravity" in app.lower() or "lab_systems_agent" in app.lower():
+                continue
+            try:
+                filtered_usage[app] = int(float(sec_val))
+            except:
+                filtered_usage[app] = 0
         
         update_data["app_usage"] = filtered_usage
 
@@ -134,9 +167,10 @@ def heartbeat():
                         "history_date": last_seen_dt.date().isoformat(),
                         "avg_score": device.get("cpu_score", 0),
                         "runtime_minutes": device.get("runtime_minutes", 0),
-                        "start_time": device.get("today_start_time") or now_iso,
-                        "end_time": device.get("today_last_active") or now_iso,
+                        "start_time": device.get("today_start_time") or device.get("last_seen") or now_iso,
+                        "end_time": device.get("today_last_active") or device.get("last_seen") or now_iso,
                         "city": device.get("city"),
+                        "college": device.get("college"),
                         "lab_name": device.get("lab_name"),
                         "app_usage": device.get("app_usage", {})
                     }
@@ -155,7 +189,43 @@ def heartbeat():
         else:
             update_data["today_start_time"] = agent_start or now_iso
         
+        # --- SESSION TRACKING ---
+        previous_status = device.get("status")
+        is_now_online = update_data["status"] == "online"
+        
+        # 1. Check if we need to start a session (Transition OR First of the day)
+        should_start_session = False
+        if is_now_online:
+            if previous_status == "offline":
+                should_start_session = True
+            else:
+                # Even if already online, check if any session exists for TODAY (UTC)
+                try:
+                    today_utc = now_dt.date().isoformat()
+                    check_session = extensions.supabase.table("device_sessions")\
+                        .select("id", count='exact')\
+                        .eq("device_id", sys_id)\
+                        .gte("start_time", f"{today_utc}T00:00:00Z")\
+                        .execute()
+                    if check_session.count == 0:
+                        should_start_session = True
+                except: pass
+
+        if should_start_session:
+            try:
+                extensions.supabase.table("device_sessions").insert({
+                    "device_id": sys_id,
+                    "city": city,
+                    "college": college,
+                    "lab_name": lab_name,
+                    "avg_score": cpu_score,
+                    "start_time": now_iso
+                }).execute()
+            except Exception as e:
+                logger.error(f"Session Start Error: {e}")
+
         extensions.supabase.table("devices").update(update_data).eq("system_id", sys_id).execute()
+
 
         # ASYNC LOGGING: Move heavy db work to background thread
         if incoming_usage:
@@ -167,6 +237,7 @@ def heartbeat():
 
         return jsonify({"status": "ok", "system_id": sys_id, "server_time": now_iso})
 
+
     except Exception as e:
         logger.error(f"Fatal in Heartbeat: {e}")
         return jsonify({"error": str(e)}), 500
@@ -175,7 +246,7 @@ def heartbeat():
 def get_available_systems():
     try:
         # List systems that haven't been bound yet (hardware_id is null)
-        res = extensions.supabase.table("devices").select("system_id, city, lab_name").is_("hardware_id", "null").execute()
+        res = extensions.supabase.table("devices").select("system_id, city, college, lab_name").is_("hardware_id", "null").execute()
         return jsonify(res.data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -211,6 +282,7 @@ def sync_offline_data():
             "start_time": data.get("start_time"),
             "end_time": data.get("end_time"),
             "city": data.get("city"),
+            "college": data.get("college"),
             "lab_name": data.get("lab_name"),
             "app_usage": data.get("app_usage", {})
         }
@@ -233,10 +305,21 @@ def sync_offline_data():
                 existing_usage[app] = existing_usage.get(app, 0) + sec
             
             history_record["app_usage"] = existing_usage
-            # Also update runtime by adding
-            history_record["runtime_minutes"] = int(existing.get("runtime_minutes", 0)) + runtime_mins
+            # AUTHORITATIVE: Use the higher value, don't SUM (prevents geometric growth)
+            history_record["runtime_minutes"] = max(int(existing.get("runtime_minutes", 0)), runtime_mins)
             # Simple average for score
             history_record["avg_score"] = (float(existing.get("avg_score", 0)) + float(data.get("cpu_score", 0))) / 2
+            
+            # Merge Times: Keep earliest start and latest end
+            if existing.get("start_time") and history_record.get("start_time"):
+                history_record["start_time"] = min(existing["start_time"], history_record["start_time"])
+            elif existing.get("start_time"):
+                history_record["start_time"] = existing["start_time"]
+
+            if existing.get("end_time") and history_record.get("end_time"):
+                history_record["end_time"] = max(existing["end_time"], history_record["end_time"])
+            elif existing.get("end_time"):
+                history_record["end_time"] = existing["end_time"]
 
         # Upsert: If data for this day already exists, we update it
         extensions.supabase.table("device_daily_history").upsert(history_record, on_conflict="device_id,history_date").execute()
@@ -269,7 +352,7 @@ def bind_system():
             return jsonify({"error": "System ID already bound"}), 400
             
         # 2. Get pre-defined info
-        res = extensions.supabase.table("devices").select("city, lab_name").eq("system_id", sys_id).execute()
+        res = extensions.supabase.table("devices").select("city, college, lab_name").eq("system_id", sys_id).execute()
         device_info = res.data[0] if res.data else {}
         
         # 3. Bind it
@@ -279,6 +362,7 @@ def bind_system():
             "status": "success", 
             "system_id": sys_id, 
             "city": device_info.get("city"), 
+            "college": device_info.get("college"),
             "lab_name": device_info.get("lab_name")
         })
     except Exception as e:
@@ -319,13 +403,12 @@ def monitor_tasks():
                 .lt("date", cleanup_date)\
                 .execute()
 
-            # 3. History Cleanup: Strict Rolling 7-Day Window
-            # (now) + (6 previous days) = 7 Total Days retained.
-            history_keep_limit = (now - timedelta(days=6)).date().isoformat()
-            extensions.supabase.table("device_daily_history")\
-                .delete()\
-                .lt("history_date", history_keep_limit)\
-                .execute()
+            # 3. History Cleanup: Removed as per USER request (Keep data permanently)
+            # history_keep_limit = (now - timedelta(days=6)).date().isoformat()
+            # extensions.supabase.table("device_daily_history")\
+            #     .delete()\
+            #     .lt("history_date", history_keep_limit)\
+            #     .execute()
 
         except Exception as e:
             logger.error(f"Error in Background Tasks: {e}")
