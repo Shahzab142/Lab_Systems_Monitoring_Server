@@ -128,7 +128,7 @@ def heartbeat():
             "last_seen": now_iso,
             "today_last_active": agent_active,
             "pc_name": pc_name,
-            "cpu_score": cpu_score,
+            "cpu_score": float(data.get("cpu_score", 0)),
             "runtime_minutes": runtime_mins,
             "status": data.get("status", "online")
         }
