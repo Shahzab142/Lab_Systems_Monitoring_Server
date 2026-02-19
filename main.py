@@ -1,2 +1,2 @@
-from wsgi_server import app as application
+from wsgi import app as application
 app = application
