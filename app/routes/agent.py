@@ -50,14 +50,14 @@ def authenticate_hardware():
         # Check if agent is providing city/lab info to update DB
         city = data.get("city")
         lab_name = data.get("lab_name")
-        college = data.get("college")
+        tehsil = data.get("tehsil")
         pc_name = data.get("pc_name")
         
-        if city or lab_name or college or pc_name:
+        if city or lab_name or tehsil or pc_name:
             update_payload = {}
             if city: update_payload["city"] = city
             if lab_name: update_payload["lab_name"] = lab_name
-            if college: update_payload["college"] = college
+            if tehsil: update_payload["tehsil"] = tehsil
             if pc_name: update_payload["pc_name"] = pc_name
             
             extensions.supabase.table("devices").update(update_payload).eq("hardware_id", hid).execute()
@@ -69,7 +69,7 @@ def authenticate_hardware():
                 "status": "authorized",
                 "system_id": device.get("system_id"),
                 "city": device.get("city"),
-                "college": device.get("college"),
+                "tehsil": device.get("tehsil"),
                 "lab_name": device.get("lab_name"),
                 "pc_name": device.get("pc_name")
             })
@@ -116,7 +116,7 @@ def heartbeat():
         pc_name = data.get("pc_name")
         cpu_score = data.get("cpu_score", 0)
         city = data.get("city")
-        college = data.get("college")
+        tehsil = data.get("tehsil")
         lab_name = data.get("lab_name")
         # Sanitize numeric data to prevent "invalid input syntax for type integer: '345.4'"
         try:
@@ -134,7 +134,7 @@ def heartbeat():
         }
 
         if city: update_data["city"] = city
-        if college: update_data["college"] = college
+        if tehsil: update_data["tehsil"] = tehsil
         if lab_name: update_data["lab_name"] = lab_name
 
         # Sanitize app_usage (durations should be integers)
@@ -170,7 +170,7 @@ def heartbeat():
                         "start_time": device.get("today_start_time") or device.get("last_seen") or now_iso,
                         "end_time": device.get("today_last_active") or device.get("last_seen") or now_iso,
                         "city": device.get("city"),
-                        "college": device.get("college"),
+                        "tehsil": device.get("tehsil"),
                         "lab_name": device.get("lab_name"),
                         "app_usage": device.get("app_usage", {})
                     }
@@ -216,7 +216,7 @@ def heartbeat():
                 extensions.supabase.table("device_sessions").insert({
                     "device_id": sys_id,
                     "city": city,
-                    "college": college,
+                    "tehsil": tehsil,
                     "lab_name": lab_name,
                     "avg_score": cpu_score,
                     "start_time": now_iso
@@ -246,7 +246,7 @@ def heartbeat():
 def get_available_systems():
     try:
         # List systems that haven't been bound yet (hardware_id is null)
-        res = extensions.supabase.table("devices").select("system_id, city, college, lab_name").is_("hardware_id", "null").execute()
+        res = extensions.supabase.table("devices").select("system_id, city, tehsil, lab_name").is_("hardware_id", "null").execute()
         return jsonify(res.data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -282,7 +282,7 @@ def sync_offline_data():
             "start_time": data.get("start_time"),
             "end_time": data.get("end_time"),
             "city": data.get("city"),
-            "college": data.get("college"),
+            "tehsil": data.get("tehsil"),
             "lab_name": data.get("lab_name"),
             "app_usage": data.get("app_usage", {})
         }
@@ -352,7 +352,7 @@ def bind_system():
             return jsonify({"error": "System ID already bound"}), 400
             
         # 2. Get pre-defined info
-        res = extensions.supabase.table("devices").select("city, college, lab_name").eq("system_id", sys_id).execute()
+        res = extensions.supabase.table("devices").select("city, tehsil, lab_name").eq("system_id", sys_id).execute()
         device_info = res.data[0] if res.data else {}
         
         # 3. Bind it
@@ -362,7 +362,7 @@ def bind_system():
             "status": "success", 
             "system_id": sys_id, 
             "city": device_info.get("city"), 
-            "college": device_info.get("college"),
+            "tehsil": device_info.get("tehsil"), 
             "lab_name": device_info.get("lab_name")
         })
     except Exception as e:

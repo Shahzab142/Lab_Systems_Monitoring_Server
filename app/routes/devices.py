@@ -144,7 +144,8 @@ def update_device(hid):
         res = extensions.supabase.table("devices").update({
             "pc_name": data.get("pc_name"),
             "city": data.get("city"),
-            "lab_name": data.get("lab_name")
+            "lab_name": data.get("lab_name"),
+            "tehsil": data.get("tehsil")
         }).eq("system_id", hid).execute()
         
         return jsonify({"status": "updated", "device": res.data[0]})
