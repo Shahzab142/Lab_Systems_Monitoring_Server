@@ -29,7 +29,7 @@ def get_location_stats():
         # Aggregate stats in Python from devices table
         try:
             # PROFESSIONAL: Fetch ONLY required columns to minimize schema mismatch risk
-            res = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, hardware_id, cpu_score, tehsil").execute()
+            res = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, tehsil").execute()
             raw_devices = res.data if res.data else []
             logger.info(f"Location Stats: Found {len(raw_devices)} total devices in DB.")
         except Exception as e:
@@ -126,7 +126,7 @@ def get_tehsil_stats(city):
         threshold = now - timedelta(seconds=60)
 
         res = extensions.supabase.table("devices")\
-            .select("city, status, last_seen, lab_name, hardware_id, cpu_score, tehsil")\
+            .select("city, status, last_seen, lab_name, tehsil")\
             .eq("city", city).execute()
         devices = res.data if res.data else []
         
@@ -186,7 +186,7 @@ def get_lab_stats(city):
     """HIERARCHY STEP 3: Return labs, with optional tehsil filter."""
     tehsil_filter = request.args.get("tehsil")
     try:
-        query = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, hardware_id, cpu_score, tehsil").eq("city", city)
+        query = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, cpu_score, tehsil").eq("city", city)
         if tehsil_filter:
             query = query.eq("tehsil", tehsil_filter)
             
@@ -265,7 +265,7 @@ def get_global_tehsil_stats():
         threshold = now - timedelta(seconds=60)
 
         res = extensions.supabase.table("devices")\
-            .select("city, status, last_seen, lab_name, hardware_id, cpu_score, tehsil")\
+            .select("city, status, last_seen, lab_name, tehsil")\
             .execute()
         devices = res.data if res.data else []
         
@@ -392,6 +392,9 @@ def rename_city():
 def delete_city():
     city = request.args.get("city")
     try:
+        # Instead of deleting rows, we just reset the city and hardware bindings if you prefer, 
+        # or actually delete if it's the intent. The frontend prompt says "Delete city and all PCs".
+        # We will reset them to 'Unknown' and unbind them to preserve the slots.
         extensions.supabase.table("devices").update({
             "hardware_id": None,
             "status": "offline",
@@ -401,6 +404,19 @@ def delete_city():
             "tehsil": "Unknown",
             "lab_name": "Unknown"
         }).eq("city", city).execute()
+        return jsonify({"status": "success"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@stats_bp.route("/stats/tehsil/rename", methods=["PATCH"])
+def rename_tehsil():
+    data = request.get_json()
+    city = data.get("city")
+    old_name = data.get("old_name")
+    new_name = data.get("new_name")
+    try:
+        extensions.supabase.table("devices").update({"tehsil": new_name})\
+            .eq("city", city).eq("tehsil", old_name).execute()
         return jsonify({"status": "success"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -441,6 +457,7 @@ def delete_device():
     hid = request.args.get("hid")
     if not hid: return jsonify({"error": "No HID"}), 400
     try:
+        # Instead of deleting, we clear the hardware binding
         extensions.supabase.table("devices").update({
             "hardware_id": None,
             "status": "offline",
@@ -451,7 +468,6 @@ def delete_device():
     except Exception as e:
         logger.error(f"Error deleting device: {e}")
         return jsonify({"error": str(e)}), 500
-
 @stats_bp.route("/stats/labs/all", methods=["GET"])
 def get_all_labs_global():
     try:
@@ -523,17 +539,19 @@ def get_utilization_stats():
             devices = res_devices.data if res_devices and res_devices.data else []
         except Exception as db_err:
             logger.error(f"Utilization DB Fetch Error: {db_err}")
-            return jsonify({"error": "Database connectivity issue", "today": {}, "lab_details": []}), 200
+            return jsonify({"error": "Database connectivity issue", "today": {}, "lab_details": []}), 200 # Return 200 with empty to avoid UI crash
 
         # Logic for "Actually Used"
         def is_actually_used(runtime_mins, app_usage_raw):
             try:
+                # Ensure runtime is a number
                 try: 
                     rt = float(runtime_mins or 0)
                 except: rt = 0
                 
                 if rt < 3: return False
                 
+                # Robust app_usage parsing
                 app_usage = app_usage_raw
                 if isinstance(app_usage, str):
                     try: app_usage = json.loads(app_usage)
@@ -593,6 +611,7 @@ def get_utilization_stats():
                     else:
                         target["idle"] = True 
 
+                # Process last seen duration for this device
                 ls_str = d.get("last_seen")
                 if ls_str:
                     try:
@@ -602,15 +621,18 @@ def get_utilization_stats():
                     except: pass
             except: continue
 
+        # Final pass for stale/ghost logic and aggregation
         today_stats = {"used_labs": 0, "idle_labs": 0, "offline_labs": 0}
         one_week_unused = []
         one_month_unused = []
 
         for key, target in lab_activity.items():
+            # Update Today Metrics
             if target["used"]: today_stats["used_labs"] += 1
             elif target["online"] > 0: today_stats["idle_labs"] += 1
             else: today_stats["offline_labs"] += 1
 
+            # Update Stale/Ghost Metrics
             last_seen_dt = lab_last_seen.get(key)
             if last_seen_dt:
                 target["last_used"] = last_seen_dt.date().isoformat()
@@ -634,6 +656,7 @@ def get_utilization_stats():
         logger.error(f"Utilization CRITICAL: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        # Return a valid empty structure instead of crashing
         return jsonify({
             "today": {"used_labs": 0, "idle_labs": 0, "offline_labs": 0},
             "one_week_unused": [],
@@ -641,3 +664,9 @@ def get_utilization_stats():
             "lab_details": [],
             "server_time": datetime.now().isoformat() + "Z"
         })
+
+    except Exception as e:
+        logger.error(f"Utilization Error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
