@@ -34,6 +34,6 @@ echo.
 echo [NOTE] Keep this window OPEN.
 echo.
 
-python wsgi.py
+python wsgi_server.py
 
 pause

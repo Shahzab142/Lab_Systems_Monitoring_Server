@@ -28,8 +28,8 @@ def get_location_stats():
 
         # Aggregate stats in Python from devices table
         try:
-            # PROFESSIONAL: Fetch ONLY required columns to minimize schema mismatch risk
-            res = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, tehsil").execute()
+            # PROFESSIONAL: Fetch ONLY required columns with high limit
+            res = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, tehsil, cpu_score").limit(5000).execute()
             raw_devices = res.data if res.data else []
             logger.info(f"Location Stats: Found {len(raw_devices)} total devices in DB.")
         except Exception as e:
@@ -113,9 +113,7 @@ def get_location_stats():
 
     except Exception as e:
         logger.error(f"Critical Error in location stats: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return jsonify([]), 500
+        return jsonify({"locations": [], "error": str(e)}), 500
 
 @stats_bp.route("/stats/city/<city>/tehsils", methods=["GET"])
 def get_tehsil_stats(city):
@@ -127,7 +125,9 @@ def get_tehsil_stats(city):
 
         res = extensions.supabase.table("devices")\
             .select("city, status, last_seen, lab_name, tehsil")\
-            .eq("city", city).execute()
+            .ilike("city", city)\
+            .limit(5000)\
+            .execute()
         devices = res.data if res.data else []
         
         tehsil_map = {}
@@ -178,30 +178,47 @@ def get_tehsil_stats(city):
             "server_time": now.replace(tzinfo=None).isoformat() + "Z"
         })
     except Exception as e:
-        logger.error(f"Tehsil Stats Error: {e}")
-        return jsonify({"error": str(e), "tehsils": []}), 500
+        logger.error(f"Tehsil Route Error: {e}")
+        return jsonify({"tehsils": [], "error": str(e)}), 500
 
 @stats_bp.route("/stats/city/<city>/labs", methods=["GET"])
 def get_lab_stats(city):
     """HIERARCHY STEP 3: Return labs, with optional tehsil filter."""
     tehsil_filter = request.args.get("tehsil")
     try:
-        query = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, cpu_score, tehsil").eq("city", city)
-        if tehsil_filter:
-            query = query.eq("tehsil", tehsil_filter)
-            
-        res = query.execute()
-        devices = res.data if res.data else []
+        # ROBUST: Filter by city first and increase limit
+        res = extensions.supabase.table("devices")\
+            .select("city, status, last_seen, lab_name, cpu_score, tehsil")\
+            .ilike("city", city)\
+            .limit(5000)\
+            .execute()
+        raw_rows = res.data if res.data else []
         
         from datetime import datetime, timedelta, timezone
         now = datetime.now(timezone.utc)
         threshold = now - timedelta(seconds=60)
         
-        lab_map = {}
-        for d in devices:
-            # Count all slots in the lab
+        # LOGICAL FILTERING & AGGREGATION
+        def normalize_name(name):
+            if not name: return "UNKNOWN"
+            return str(name).strip().upper()
 
-            lab = d.get("lab_name") or "Main Lab"
+        lab_map = {}
+        target_city = city.strip().upper()
+        target_tehsil = tehsil_filter.strip().upper() if tehsil_filter else None
+
+        for d in raw_rows:
+            # 1. City Check
+            curr_city = normalize_name(d.get("city"))
+            if curr_city != target_city:
+                continue
+
+            # 2. Tehsil Check
+            curr_tehsil = normalize_name(d.get("tehsil"))
+            if target_tehsil and curr_tehsil != target_tehsil:
+                continue
+
+            lab = normalize_name(d.get("lab_name") or "Main Lab")
             cpu = float(d.get("cpu_score") or 0)
             
             if lab not in lab_map:
@@ -211,7 +228,8 @@ def get_lab_stats(city):
                     "online": 0, 
                     "offline": 0,
                     "total_cpu": 0,
-                    "online_count": 0
+                    "online_count": 0,
+                    "tehsil": curr_tehsil # Store normalized tehsil
                 }
             
             target = lab_map[lab]
@@ -244,7 +262,8 @@ def get_lab_stats(city):
                 "total_pcs": data["total_pcs"],
                 "online": data["online"],
                 "offline": data["offline"],
-                "avg_performance": round(avg_perf, 2)
+                "avg_performance": round(avg_perf, 2),
+                "tehsil": data.get("tehsil", "UNKNOWN")
             })
             
         return jsonify({
@@ -254,7 +273,7 @@ def get_lab_stats(city):
 
     except Exception as e:
         logger.error(f"Error in lab stats: {e}")
-        return jsonify([]), 500
+        return jsonify({"labs": [], "error": str(e)}), 500
 
 @stats_bp.route("/stats/tehsils", methods=["GET"])
 def get_global_tehsil_stats():
@@ -266,6 +285,7 @@ def get_global_tehsil_stats():
 
         res = extensions.supabase.table("devices")\
             .select("city, status, last_seen, lab_name, tehsil")\
+            .limit(5000)\
             .execute()
         devices = res.data if res.data else []
         
@@ -475,31 +495,49 @@ def get_all_labs_global():
         now = datetime.now(timezone.utc)
         threshold = now - timedelta(seconds=60)
 
-        # Fetch all registered devices using explicit column list
-        res = extensions.supabase.table("devices").select("city, status, last_seen, lab_name, tehsil").execute()
+        # Fetch registered or pre-populated slots
+        res = extensions.supabase.table("devices")\
+            .select("system_id, city, status, last_seen, lab_name, tehsil")\
+            .limit(5000)\
+            .execute()
         raw_devices = res.data if res.data else []
         
+        def normalize_name(name):
+            if not name: return "UNKNOWN"
+            return str(name).strip().upper()
+
         lab_map = {}
         for d in raw_devices:
-            # Process all devices in the inventory
+            # Get raw values
+            r_city = d.get("city") or "Unknown"
+            r_tehsil = d.get("tehsil") or "Unknown"
+            r_lab = (d.get("lab_name") or d.get("lab") or "Main Lab").strip()
             
-            lab = d.get("lab_name") or "Main Lab"
-            city = d.get("city") or "Unknown"
-            # Use a unique key for labs in case names repeat across cities
-            key = f"{city}|{lab}"
+            # Normalize for grouping
+            n_city = normalize_name(r_city)
+            n_tehsil = normalize_name(r_tehsil)
+            n_lab = normalize_name(r_lab)
+
+            # THE ABSOLUTE KEY: Must be unique for ONE card in the UI
+            key = f"{n_city}::{n_tehsil}::{n_lab}"
             
             if key not in lab_map:
                 lab_map[key] = {
-                    "lab_name": lab,
-                    "city": city,
-                    "tehsil": d.get("tehsil") or "Unknown",
+                    "lab_name": r_lab,
+                    "city": r_city,
+                    "tehsil": r_tehsil,
+                    "norm_lab": n_lab,
+                    "norm_city": n_city,
+                    "norm_tehsil": n_tehsil,
                     "total_pcs": 0,
                     "online": 0,
-                    "offline": 0
+                    "offline": 0,
+                    "system_ids": []
                 }
             
             target = lab_map[key]
             target["total_pcs"] += 1
+            target["system_ids"].append(str(d.get("system_id")))
             
             is_online = False
             if d.get("status") == "online" and d.get("last_seen"):
@@ -514,13 +552,19 @@ def get_all_labs_global():
             else:
                 target["offline"] += 1
         
+        # LOG FOR DEBUGGING (Visible in server logs)
+        for k, v in lab_map.items():
+            if v["total_pcs"] > 1:
+                logger.info(f"Grouped Lab: {k} | IDs: {v['system_ids']}")
+
         return jsonify({
             "labs": list(lab_map.values()),
-            "server_time": now.replace(tzinfo=None).isoformat() + "Z"
+            "server_time": now.replace(tzinfo=None).isoformat() + "Z",
+            "count": len(raw_devices)
         })
     except Exception as e:
         logger.error(f"Error in all labs stats: {e}")
-        return jsonify([]), 500
+        return jsonify({"labs": [], "error": str(e)}), 500
 
 @stats_bp.route("/stats/utilization", methods=["GET"])
 def get_utilization_stats():
@@ -590,8 +634,9 @@ def get_utilization_stats():
         for d in devices:
             try:
                 raw_city = (d.get('city') or 'Unknown').strip()
+                raw_tehsil = (d.get('tehsil') or 'Unknown').strip()
                 raw_lab = (d.get('lab_name') or 'Main Lab').strip()
-                key = f"{raw_city}|{raw_lab}"
+                key = f"{raw_city}|{raw_tehsil}|{raw_lab}"
                 
                 if key not in lab_activity:
                     lab_activity[key] = {
