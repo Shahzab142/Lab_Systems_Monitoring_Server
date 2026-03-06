@@ -3,4 +3,4 @@ services:
     name: lab-guardian-api
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -c gunicorn_config.py wsgi_server:app
+    startCommand: gunicorn -c gunicorn_config.py wsgi:app
