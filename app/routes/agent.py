@@ -77,16 +77,21 @@ def authenticate_hardware():
         return jsonify({"error": "Missing Hardware ID"}), 400
         
     try:
-        # Hierarchy and identity should be managed via Dashboard.
-        # Auto-update from Agent is disabled to prevent overwriting with stale local cache.
-        # if city or lab_name or tehsil or pc_name:
-        #     update_payload = {}
-        #     if city: update_payload["city"] = city
-        #     if lab_name: update_payload["lab_name"] = lab_name
-        #     if tehsil: update_payload["tehsil"] = tehsil
-        #     if pc_name: update_payload["pc_name"] = pc_name
-        #     
-        #     extensions.supabase.table("devices").update(update_payload).eq("hardware_id", hid).execute()
+        # Hierarchy and identity should be managed via Dashboard, 
+        # but allowed here for agent-side manual syncs.
+        city = data.get("city")
+        lab_name = data.get("lab_name")
+        tehsil = data.get("tehsil")
+        pc_name = data.get("pc_name")
+
+        if city or lab_name or tehsil or pc_name:
+            update_payload = {}
+            if city: update_payload["city"] = city
+            if lab_name: update_payload["lab_name"] = lab_name
+            if tehsil: update_payload["tehsil"] = tehsil
+            if pc_name: update_payload["pc_name"] = pc_name
+            
+            extensions.supabase.table("devices").update(update_payload).eq("hardware_id", hid).execute()
 
         res = extensions.supabase.table("devices").select("*").eq("hardware_id", hid).execute()
         if res.data:
@@ -174,9 +179,9 @@ def heartbeat():
         }
 
         # Hierarchy is now authoritative from DB only.
-        # if city: update_data["city"] = city
-        # if tehsil: update_data["tehsil"] = tehsil
-        # if lab_name: update_data["lab_name"] = lab_name
+        if city: update_data["city"] = city
+        if tehsil: update_data["tehsil"] = tehsil
+        if lab_name: update_data["lab_name"] = lab_name
 
         # Sanitize app_usage (durations should be integers)
         incoming_usage = data.get("app_usage", {})
